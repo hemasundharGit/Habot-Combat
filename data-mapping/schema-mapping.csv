@@ -1,0 +1,11 @@
+Raw JSON Field (Incoming Payload),DCYN Field Name,Data Type,Transformation Logic,BigQuery Destination Column,Nullable
+student_reference_number,student_id,String,"Validated against pattern STU-XXXXXX; rejected if it does not match exactly",student_id,No
+parent_email_address,guardian_email,String,"Validated as a well formed email address; no transformation applied",guardian_email,No
+parent_full_name,guardian_full_name,String,"Trimmed of leading and trailing whitespace; length checked between 2 and 120 characters",guardian_full_name,No
+date_of_birth,student_date_of_birth,Date,"Parsed using the exact format Year-Month-Day; rejected if format does not match",student_date_of_birth,No
+learning_difficulty_description,has_diagnosed_learning_difficulty,Boolean,"Free text description is deconstructed into a strict True or False value based on presence of a formal diagnosis; the original free text is not stored",has_diagnosed_learning_difficulty,No
+support_needed_flag,requires_lsa_support,Boolean,"Coerced from incoming Yes or No style string into a strict Boolean; rejected if any other value such as Maybe is received",requires_lsa_support,No
+consent_checkbox,consent_given,Boolean,"Must equal True or the record is rejected outright before staging",consent_given,No
+enrollment_status,is_returning_student,Boolean,"Deconstructed from an enrollment status string into a strict Boolean indicating whether the student was previously enrolled",is_returning_student,No
+support_schedule_notes,support_frequency,String (Enumerated),"Free text schedule notes are deconstructed into exactly one of four Allowed Values: Daily, Weekly, As Needed, or Not Applicable",support_frequency,No
+submission_timestamp,ingested_at,Timestamp,"Recorded automatically at the time of successful validation, not taken from the raw payload",ingested_at,No

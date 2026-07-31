@@ -1,0 +1,111 @@
+# =============================================================================
+# HabotConnect — Poka-Yoke Automated Build Gate (Task 2)
+# Candidate: Kolla Hema Sundharam | Contact: kollahemasundharam.tech9@gmail.com
+#
+# Purpose: Enforce a strict FAIL-CLOSED gate. Any of the following blocks the
+# build immediately — no merge, no deploy:
+#   - Python lint/formatting violations
+#   - Terraform format/validation violations
+#   - Hardcoded secrets or raw API keys detected in the diff
+#
+# To make this a true fail-closed gate, this workflow must ALSO be set as a
+# "Required status check" in the repository's branch protection rules
+# (Settings > Branches > Branch protection > Require status checks to pass).
+# Without that setting, GitHub Actions failing does not, by itself, block a
+# merge — that configuration step is part of the design and should be shown
+# in your presentation (screenshot of the branch protection settings page).
+# =============================================================================
+
+name: Poka-Yoke Build Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same PR to save CI minutes.
+concurrency:
+  group: build-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    name: "Gate 1 — Secret Scan (Fail-Closed)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so the scanner can check all commits, not just HEAD
+
+      - name: Run Gitleaks secret scanner
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # No continue-on-error — a detected secret fails this job immediately,
+        # which in turn blocks the required check on the PR.
+
+  python-lint:
+    name: "Gate 2 — Python Lint & Format (Fail-Closed)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lint tools
+        run: pip install ruff black
+
+      - name: Run ruff (style + correctness lint)
+        run: ruff check .
+
+      - name: Run black (format check only, no auto-fix in CI)
+        run: black --check .
+
+  terraform-validate:
+    name: "Gate 3 — Terraform Format & Validate (Fail-Closed)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform fmt check
+        run: terraform -chdir=terraform fmt -check -recursive
+
+      - name: Terraform init (no backend, validate only)
+        run: terraform -chdir=terraform init -backend=false
+
+      - name: Terraform validate
+        run: terraform -chdir=terraform validate
+
+      - name: Run tflint for security/style rules
+        uses: terraform-linters/setup-tflint@v4
+      - run: |
+          tflint --init
+          tflint --chdir=terraform
+
+  build-gate-summary:
+    name: "Build Gate — Final Status"
+    runs-on: ubuntu-latest
+    needs: [secret-scan, python-lint, terraform-validate]
+    if: always()
+    steps:
+      - name: Fail closed if any gate failed
+        run: |
+          if [ "${{ needs.secret-scan.result }}" != "success" ] || \
+             [ "${{ needs.python-lint.result }}" != "success" ] || \
+             [ "${{ needs.terraform-validate.result }}" != "success" ]; then
+            echo "One or more Poka-Yoke gates failed. Blocking build — quarantining commit."
+            exit 1
+          fi
+          echo "All gates passed. Build approved for merge/deploy."

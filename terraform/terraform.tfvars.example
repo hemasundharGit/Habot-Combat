@@ -1,0 +1,10 @@
+# terraform.tfvars.example
+# Safe to commit — placeholder structure only. Copy this to terraform.tfvars
+# (which is gitignored) and fill in real values before running terraform.
+
+project_id                     = "your-gcp-project-id"
+region                          = "us-central1"
+raw_landing_bucket_name         = "your-unique-raw-landing-bucket-name"
+staged_dataset_id               = "d1_staged_enforced"
+pipeline_service_account_email  = "pipeline-sa@your-gcp-project-id.iam.gserviceaccount.com"
+analyst_group_email             = "analysts@yourdomain.com"

@@ -1,0 +1,10 @@
+# Never commit real environment values
+terraform.tfvars
+*.tfvars
+!terraform.tfvars.example
+
+# Terraform state and local cache
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
