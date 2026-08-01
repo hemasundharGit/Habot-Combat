@@ -2,8 +2,8 @@
 
 **Candidate Name:** Kolla Hema Sundharam
 **Contact Email:** kollahemasundharam.tech9@gmail.com
-**Contact Phone:** [YOUR PHONE NUMBER]
-**Submission Date:** [DATE]
+**Contact Phone:** +91 9505005629
+**Submission Date:** 02-08-2026
 
 ---
 
