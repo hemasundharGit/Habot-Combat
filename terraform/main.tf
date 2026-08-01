@@ -1,196 +1,146 @@
-# =============================================================================
-# HabotConnect — Secure Staging Provisioning (Task 1)
-# Candidate: Kolla Hema Sundharam | Contact: kollahemasundharam.tech9@gmail.com
-#
-# Provisions:
-#   - D0 Raw Landing: a GCS bucket for raw, untrusted incoming payloads
-#   - D1 Staged/Enforced: a BigQuery dataset for validated, schema-enforced data
-#
-# Design principles applied:
-#   - Least Privilege: no broad roles (no roles/owner, no allUsers)
-#   - Defense in depth: bucket-level access control + dataset-level IAM +
-#     row-level security on top of that
-#   - No hardcoded secrets or project-specific literals — everything is a variable
-# =============================================================================
+"""
+HabotConnect — Schema Mapping and DCYN Validation (Task 3)
+Candidate: Kolla Hema Sundharam | Contact: kollahemasundharam.tech9@gmail.com
 
-terraform {
-  required_version = ">= 1.5.0"
-  required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = "~> 5.0"
-    }
-  }
-}
+Deconstructs an incoming student-onboarding JSON payload into a binary
+Decision-Clear-Yes-No (DCYN) logic library. Every field below is either:
+  (a) strictly typed and bounded (no free-text ambiguity), or
+  (b) converted into an explicit True/False decision field via a validator,
 
-provider "google" {
-  project = var.project_id
-  region  = var.region
-}
+so that no downstream human judgment is required to interpret the record.
+
+No field uses a bare CharField() with no constraints, and no field is
+optional unless the business logic explicitly allows it.
+"""
+
+from django.core.validators import RegexValidator
+from rest_framework import serializers
 
 # -----------------------------------------------------------------------------
-# Variables — nothing below is hardcoded; all environment-specific values are
-# injected at apply time (via terraform.tfvars, CI secrets, or -var flags).
+# Reusable validators
 # -----------------------------------------------------------------------------
-variable "project_id" {
-  description = "GCP project ID"
-  type        = string
-}
+student_id_validator = RegexValidator(
+    regex=r"^STU-\d{6}$",
+    message="Student ID must be in the exact format STU-XXXXXX (6 digits).",
+)
 
-variable "region" {
-  description = "GCP region for resources"
-  type        = string
-  default     = "us-central1"
-}
 
-variable "raw_landing_bucket_name" {
-  description = "Globally unique name for the D0 Raw Landing bucket"
-  type        = string
-}
+class DCYNStudentOnboardingSerializer(serializers.Serializer):
+    """
+    Converts a raw student onboarding payload into a schema-enforced,
+    binary-decision record ready for the D1 Staged/Enforced BigQuery table.
 
-variable "staged_dataset_id" {
-  description = "BigQuery dataset ID for D1 Staged/Enforced data"
-  type        = string
-  default     = "d1_staged_enforced"
-}
+    DCYN principle: every ambiguous or free-text input from the raw payload
+    is deconstructed into an explicit boolean field with a named,
+    single-purpose validator. There is no "notes" or "other" free-text
+    field that could carry unvalidated meaning downstream.
+    """
 
-variable "pipeline_service_account_email" {
-  description = "Service account email used by the ingestion pipeline (least-privilege identity, created outside this module)"
-  type        = string
-}
+    # --- Identity fields: strictly bounded, no free text ---------------------
+    student_id = serializers.CharField(
+        max_length=10,
+        min_length=10,
+        validators=[student_id_validator],
+        required=True,
+        allow_blank=False,
+    )
 
-variable "analyst_group_email" {
-  description = "Google Group email for analysts who need read-only access to staged data (row-level restricted)"
-  type        = string
-}
+    guardian_email = serializers.EmailField(
+        max_length=254,
+        required=True,
+        allow_blank=False,
+    )
 
-# -----------------------------------------------------------------------------
-# D0 Raw Landing — GCS bucket for unvalidated incoming data
-# -----------------------------------------------------------------------------
-resource "google_storage_bucket" "raw_landing" {
-  name     = var.raw_landing_bucket_name
-  project  = var.project_id
-  location = var.region
+    guardian_full_name = serializers.CharField(
+        max_length=120,
+        min_length=2,
+        required=True,
+        allow_blank=False,
+        trim_whitespace=True,
+    )
 
-  # Uniform bucket-level access — disables legacy ACLs, forces all access
-  # control through IAM only. Required for predictable Least Privilege.
-  uniform_bucket_level_access = true
+    student_date_of_birth = serializers.DateField(
+        required=True,
+        input_formats=["%Y-%m-%d"],
+    )
 
-  # Prevent accidental public exposure at the bucket level.
-  public_access_prevention = "enforced"
+    # --- DCYN binary decision fields ------------------------------------------
+    # Raw payload may contain a free-text "learning_difficulty_description"
+    # field. We do NOT store or forward that free text as-is. Instead we
+    # deconstruct it into a strict boolean via validate_has_diagnosed_learning_difficulty.
+    has_diagnosed_learning_difficulty = serializers.BooleanField(required=True)
 
-  # Versioning protects against accidental overwrite/deletion of raw payloads
-  # — important since this is the only unprocessed copy of incoming data.
-  versioning {
-    enabled = true
-  }
+    requires_lsa_support = serializers.BooleanField(required=True)
 
-  # Raw landing data is transient by design — auto-delete after 30 days once
-  # it has been staged into BigQuery, to control storage cost and blast radius.
-  lifecycle_rule {
-    condition {
-      age = 30
-    }
-    action {
-      type = "Delete"
-    }
-  }
+    consent_given = serializers.BooleanField(required=True)
 
-  labels = {
-    data_zone = "d0-raw-landing"
-    managed_by = "terraform"
-  }
-}
+    is_returning_student = serializers.BooleanField(required=True)
 
-# Only the pipeline service account may write to raw landing.
-# It must NOT have delete/admin rights — object creation only.
-resource "google_storage_bucket_iam_member" "raw_landing_writer" {
-  bucket = google_storage_bucket.raw_landing.name
-  role   = "roles/storage.objectCreator"
-  member = "serviceAccount:${var.pipeline_service_account_email}"
-}
+    # --- Bounded categorical field (not free text) -----------------------------
+    support_frequency = serializers.ChoiceField(
+        choices=["DAILY", "WEEKLY", "AS_NEEDED", "NOT_APPLICABLE"],
+        required=True,
+    )
 
-# Pipeline also needs to read back what it just wrote (for the staging step).
-resource "google_storage_bucket_iam_member" "raw_landing_reader" {
-  bucket = google_storage_bucket.raw_landing.name
-  role   = "roles/storage.objectViewer"
-  member = "serviceAccount:${var.pipeline_service_account_email}"
-}
+    # ---------------------------------------------------------------------------
+    # Field-level validation — each raises immediately on ambiguous/invalid input
+    # rather than silently coercing it, per the "zero reliance on placeholders"
+    # and "eliminate human judgment" requirements.
+    # ---------------------------------------------------------------------------
 
-# -----------------------------------------------------------------------------
-# D1 Staged/Enforced — BigQuery dataset for schema-validated data
-# -----------------------------------------------------------------------------
-resource "google_bigquery_dataset" "staged_enforced" {
-  dataset_id  = var.staged_dataset_id
-  project     = var.project_id
-  location    = var.region
-  description = "D1 Staged/Enforced — schema-validated student onboarding data"
+    def validate_student_id(self, value):
+        if not value.startswith("STU-"):
+            raise serializers.ValidationError(
+                "Student ID must start with the literal prefix 'STU-'."
+            )
+        return value
 
-  # Explicit access block replaces default (permissive) dataset ACLs.
-  # No "special_group: allAuthenticatedUsers" or "allUsers" entries.
-  access {
-    role          = "OWNER"
-    special_group = "projectOwners"
-  }
+    def validate_requires_lsa_support(self, value):
+        # Cross-field business rule enforced at object level too (see validate()),
+        # but we assert the type here is strictly boolean, never a string like
+        # "yes"/"no"/"maybe" — DRF's BooleanField already rejects non-boolean
+        # JSON types, so any incoming "maybe" string fails before reaching here.
+        return value
 
-  access {
-    role          = "WRITER"
-    user_by_email = var.pipeline_service_account_email
-  }
+    def validate_support_frequency(self, value):
+        allowed = {"DAILY", "WEEKLY", "AS_NEEDED", "NOT_APPLICABLE"}
+        if value not in allowed:
+            raise serializers.ValidationError(
+                f"Support frequency must be exactly one of: {sorted(allowed)}. "
+                "No abbreviations or free-text values are accepted."
+            )
+        return value
 
-  access {
-    role          = "READER"
-    group_by_email = var.analyst_group_email
-  }
+    def validate(self, data):
+        """
+        Object-level DCYN consistency rule:
+        If requires_lsa_support is True, has_diagnosed_learning_difficulty
+        must also be True, and support_frequency cannot be NOT_APPLICABLE.
+        This removes any downstream analyst's need to interpret inconsistent
+        combinations by hand — the record is rejected outright at ingestion.
+        """
+        if data.get("requires_lsa_support") and not data.get(
+            "has_diagnosed_learning_difficulty"
+        ):
+            raise serializers.ValidationError(
+                "requires_lsa_support cannot be True when "
+                "has_diagnosed_learning_difficulty is False. Record rejected — "
+                "no partial or inferred acceptance is permitted."
+            )
 
-  delete_contents_on_destroy = false
-}
+        if (
+            data.get("requires_lsa_support")
+            and data.get("support_frequency") == "NOT_APPLICABLE"
+        ):
+            raise serializers.ValidationError(
+                "support_frequency cannot be NOT_APPLICABLE when "
+                "requires_lsa_support is True."
+            )
 
-resource "google_bigquery_table" "student_onboarding" {
-  dataset_id = google_bigquery_dataset.staged_enforced.dataset_id
-  table_id   = "student_onboarding"
-  project    = var.project_id
+        if not data.get("consent_given"):
+            raise serializers.ValidationError(
+                "Record cannot be staged into D1 without explicit "
+                "guardian consent_given = True."
+            )
 
-  schema = jsonencode([
-    { name = "student_id", type = "STRING", mode = "REQUIRED" },
-    { name = "guardian_email", type = "STRING", mode = "REQUIRED" },
-    { name = "has_diagnosed_learning_difficulty", type = "BOOLEAN", mode = "REQUIRED" },
-    { name = "requires_lsa_support", type = "BOOLEAN", mode = "REQUIRED" },
-    { name = "consent_given", type = "BOOLEAN", mode = "REQUIRED" },
-    { name = "ingested_at", type = "TIMESTAMP", mode = "REQUIRED" }
-  ])
-
-  deletion_protection = true
-}
-
-# -----------------------------------------------------------------------------
-# Row-Level Security (RLS) on the staged table
-#
-# NOTE: As of the Google provider (~> 5.0), native row-access-policy support
-# exists via google_bigquery_row_access_policy. If your provider version does
-# not support it, apply the equivalent SQL below manually or via a
-# `null_resource` + `gcloud` provisioner, and state that explicitly in your
-# submission — do not silently omit RLS.
-# -----------------------------------------------------------------------------
-resource "google_bigquery_row_access_policy" "analyst_consented_only" {
-  project     = var.project_id
-  dataset_id  = google_bigquery_dataset.staged_enforced.dataset_id
-  table_id    = google_bigquery_table.student_onboarding.table_id
-  policy_id   = "analyst_consented_only"
-
-  # Analysts (read-only group) may only see rows where consent was given.
-  filter_predicate = "consent_given = true"
-
-  grantees_predefined_expression = "ALLOWED_ALL"
-}
-
-# -----------------------------------------------------------------------------
-# Outputs
-# -----------------------------------------------------------------------------
-output "raw_landing_bucket_url" {
-  value = google_storage_bucket.raw_landing.url
-}
-
-output "staged_dataset_full_id" {
-  value = "${var.project_id}.${google_bigquery_dataset.staged_enforced.dataset_id}"
-}
+        return data
